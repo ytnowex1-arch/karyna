@@ -4,7 +4,6 @@ import base64
 import httpx
 import time
 import json
-from threading import Thread
 from flask import Flask, request
 from telegram import Update
 from telegram.constants import ChatAction
@@ -60,6 +59,7 @@ async def get_chat_history(limit=20):
     if not db: return ""
     try:
         logs_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs")
+        # Pobranie dokumentów bez skomplikowanych filtrów (Rule 2)
         docs = logs_ref.limit(50).get()
         
         history = []
@@ -80,9 +80,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text or msg.caption or ""
     user_name = msg.from_user.full_name or "Ziomek"
-    topic_id = msg.message_thread_id # ID podgrupy/wątku
+    topic_id = msg.message_thread_id 
 
-    # Funkcja diagnostyczna
     if "karyna jakie to id" in text.lower():
         await msg.reply_text(f"Mordo, ID tej podgrupy to: `{topic_id}`", parse_mode='Markdown', message_thread_id=topic_id)
         return
@@ -90,7 +89,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text:
         await save_message_to_db(user_name, text, topic_id)
 
-    # Sprawdzenie czy bot powinien odpowiedzieć
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id
     should_respond = "karyna" in text.lower() or is_reply_to_bot or msg.chat.type == "private"
 
@@ -104,7 +102,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = (
             "Jesteś Karyną. Dziewczyna z polskiego osiedla, pyskata, ale lojalna ziomalka. "
             "Mówisz szorstko, potocznie, po polsku. Używasz slangu (mordo, ziom, lipa, ogarnij się). "
-            "Jeśli jesteś w grupie tematycznej, zachowuj się swobodnie. "
             "Oto co pisali wcześniej:\n"
             f"{history_context}\n\n"
             "Odpowiedz krótko i konkretnie na ostatnią wiadomość."
@@ -136,7 +133,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data = res.json()
                     ans = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "")
                     if ans:
-                        # Ważne: wysyłamy odpowiedź z zachowaniem thread_id
                         await msg.reply_text(ans, message_thread_id=topic_id)
                 else:
                     log(f"Błąd Gemini API: {res.status_code}")
@@ -150,20 +146,29 @@ application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CA
 app = Flask(__name__)
 
 @app.route("/", methods=['GET', 'POST'])
-async def webhook():
+def webhook():
     if request.method == 'POST':
         try:
-            update = Update.de_json(request.get_json(force=True), application.bot)
-            await application.process_update(update)
+            # Używamy pętli zdarzeń do asynchronicznego przetworzenia update'u
+            data = request.get_json(force=True)
+            update = Update.de_json(data, application.bot)
+            
+            # Uruchomienie przetwarzania w pętli asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(application.process_update(update))
+            loop.close()
         except Exception as e:
             log(f"Błąd procesowania update: {e}")
         return "OK", 200
     return "Karyna is alive", 200
 
 def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.initialize())
+    # Inicjalizacja bota
+    init_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(init_loop)
+    init_loop.run_until_complete(application.initialize())
+    init_loop.close()
     
     port = int(os.environ.get("PORT", 8080))
     log(f"Karyna startuje na porcie {port}")
