@@ -24,6 +24,9 @@ TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 FIREBASE_JSON = os.environ.get("FIREBASE_CONFIG", "")
 APP_ID = os.environ.get("APP_ID", "karyna_bot_gcp")
 
+# ID DOZWOLONEJ PODGRUPY (TOPIC ID)
+ALLOWED_TOPIC_ID = 60061
+
 # --- INICJALIZACJA FIREBASE ---
 db = None
 if FIREBASE_JSON:
@@ -80,6 +83,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text or msg.caption or ""
     user_name = msg.from_user.full_name or "Ziomek"
     topic_id = msg.message_thread_id 
+
+    # BLOKADA: Karyna reaguje tylko w wyznaczonym temacie (lub w czacie prywatnym)
+    if msg.chat.type != "private" and topic_id != ALLOWED_TOPIC_ID:
+        return
 
     # Diagnostyka ID tematu
     if "karyna jakie to id" in text.lower():
