@@ -39,8 +39,9 @@ if FIREBASE_JSON:
     except Exception as e:
         print(f">>> Błąd połączenia z Firebase: {e}")
 
-# UŻYWAMY PEŁNEJ NAZWY WERSJI DLA REGIONU EUROPE-WEST1
-MODEL_NAME = "gemini-1.5-flash-001"
+# ZMIANA NA NAJNOWSZY MODEL Z TWOJEGO LOGA (Kwiecień 2026)
+# Log mówi, że 1.5 wyłączyli, więc lecimy w 2.5 lub 3.1
+MODEL_NAME = "gemini-2.5-flash" 
 
 def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -49,6 +50,7 @@ def log(msg):
 async def save_message_to_db(user_name, text, topic_id):
     if not db: return
     try:
+        # Kolekcja zgodnie z Twoim schematem
         doc_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs").document()
         doc_ref.set({
             "user": user_name,
@@ -85,12 +87,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = msg.from_user.full_name or "Ziomek"
     current_topic_id = str(msg.message_thread_id) if msg.message_thread_id else "None"
 
-    # BLOKADA TEMATU
+    # Filtrowanie wątku
     if msg.chat.type != "private" and current_topic_id != ALLOWED_TOPIC_ID:
-        return
-
-    if "karyna jakie to id" in text.lower():
-        await msg.reply_text(f"Mordo, ID tej podgrupy to: `{current_topic_id}`", parse_mode='Markdown')
         return
 
     if text:
@@ -100,7 +98,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     should_respond = "karyna" in text.lower() or is_reply_to_bot or msg.chat.type == "private"
 
     if should_respond:
-        log(f"Generuję odpowiedź dla {user_name} w wątku {current_topic_id} używając {MODEL_NAME}")
+        log(f"Generuję odpowiedź dla {user_name} używając {MODEL_NAME}")
         try:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING, message_thread_id=msg.message_thread_id)
         except: pass
@@ -109,9 +107,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = (
             "Jesteś Karyną. Dziewczyna z polskiego osiedla, pyskata, ale lojalna ziomalka. "
             "Mówisz szorstko, potocznie, po polsku. Używasz slangu (mordo, ziom, lipa, ogarnij się). "
-            "Oto historia ostatniej rozmowy dla kontekstu:\n"
-            f"{history_context}\n\n"
-            "Odpowiedz krótko, osiedlowym stylem."
+            f"Historia rozmowy:\n{history_context}"
         )
 
         image_part = None
@@ -122,7 +118,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 image_part = {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(image_bytes).decode('utf-8')}}
             except: pass
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
+        # Endpoint v1beta czasami świruje przy zmianach, v1 jest stabilniejszy dla GA
+        url = f"https://generativelanguage.googleapis.com/v1/models/{MODEL_NAME}:generateContent?key={API_KEY}"
         
         contents_parts = [{"text": text}]
         if image_part:
@@ -135,6 +132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async with httpx.AsyncClient() as client:
             try:
+                # Retries z exponential backoff
                 for attempt in range(5):
                     res = await client.post(url, json=payload, timeout=30.0)
                     if res.status_code == 200:
@@ -143,15 +141,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if ans:
                             await msg.reply_text(ans, message_thread_id=msg.message_thread_id)
                         break
-                    elif res.status_code == 429: 
+                    elif res.status_code == 429:
                         await asyncio.sleep(2 ** attempt)
                     else:
-                        log(f"Błąd Gemini API: {res.status_code} - {res.text}")
-                        break
+                        log(f"Błąd Gemini API ({res.status_code}): {res.text}")
+                        # Próba przełączenia na v1beta jeśli v1 nie pykło
+                        if "v1" in url:
+                             url = url.replace("/v1/", "/v1beta/")
+                        else:
+                            break
             except Exception as e:
                 log(f"Błąd komunikacji z AI: {e}")
 
-# --- KONFIGURACJA WEBHOOKA ---
+# --- KONFIGURACJA WEBHOOKA (FLASK) ---
 application = ApplicationBuilder().token(TG_TOKEN).build()
 application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
 
@@ -177,7 +179,7 @@ def webhook():
         finally:
             loop.close()
         return "OK", 200
-    return "Karyna AI Status: Online", 200
+    return "Karyna AI Status: Online (Version 2026.04.30)", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
