@@ -1,0 +1,10 @@
+python-telegram-bot
+httpx
+flask
+firebase-admin
+
+**Co teraz?**
+1. Wrzuć te pliki na GitHub.
+2. W Google Cloud Console, tam gdzie skończyliśmy, dokończ konfigurację łącząc się z tym repozytorium.
+3. Dodaj zmienne środowiskowe: `GEMINI_API_KEY`, `TELEGRAM_TOKEN`, `FIREBASE_CONFIG` (ten długi JSON z Firebase) oraz `APP_ID`.
+4. Kliknij **Utwórz** i czekaj na start Karyny! eof
