@@ -28,6 +28,7 @@ FIREBASE_JSON = os.environ.get("FIREBASE_CONFIG", "")
 APP_ID = os.environ.get("APP_ID", "karyna_bot_gcp")
 ALLOWED_TOPIC_ID = "60061"
 
+MODEL_TEXT = "gemini-2.5-flash"
 MODEL_TTS = "gemini-2.5-flash-preview-tts"
 
 db = None
@@ -62,7 +63,7 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
     wav_buf.seek(0)
     return wav_buf
 
-async def get_chat_history(limit=10):
+async def get_chat_history(limit=8):
     if not db: return ""
     try:
         logs_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs")
@@ -73,19 +74,17 @@ async def get_chat_history(limit=10):
         return "\n".join([f"{m.get('user', 'Anon')}: {m.get('text', '')}" for m in recent])
     except: return ""
 
-async def call_gemini_with_retry(url, payload, max_retries=3):
+async def call_gemini(url, payload):
     async with httpx.AsyncClient() as client:
-        for i in range(max_retries):
-            try:
-                res = await client.post(url, json=payload, timeout=60.0)
-                if res.status_code == 200:
-                    return res.json()
-                print(f">>> Błąd API {res.status_code}, retry {i+1}...")
-                await asyncio.sleep(2 ** i)
-            except Exception as e:
-                print(f">>> Wyjątek: {e}")
-                await asyncio.sleep(2 ** i)
-    return None
+        try:
+            res = await client.post(url, json=payload, timeout=60.0)
+            if res.status_code == 200:
+                return res.json()
+            print(f">>> Błąd API {res.status_code}: {res.text}")
+            return None
+        except Exception as e:
+            print(f">>> Wyjątek API: {e}")
+            return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -94,39 +93,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text or msg.caption or ""
     current_topic_id = str(msg.message_thread_id) if msg.message_thread_id else "None"
 
-    # --- ANTY-SPAM (General) ---
+    # --- ANTY-SPAM ---
     if current_topic_id in ["None", "0"]:
         if "potencjalny dochód" in text.lower():
             try:
                 await msg.delete()
-                riposty = ["Sorki mordo, wyjazd z tym spamem. 💅", "Nie szukaj tu frajerów! 🖕"]
-                await context.bot.send_message(chat_id=msg.chat_id, text=random.choice(riposty), message_thread_id=msg.message_thread_id)
+                await context.bot.send_message(chat_id=msg.chat_id, text="Wyjazd z tym spamem, mordo! 🖕", message_thread_id=msg.message_thread_id)
                 return
             except: pass
 
-    # --- REAGOWANIE ---
     is_reply = msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id
     should_respond = "karyna" in text.lower() or is_reply or msg.chat.type == "private"
 
     if should_respond:
-        try:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE, message_thread_id=msg.message_thread_id)
-        except: pass
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE, message_thread_id=msg.message_thread_id)
 
-        history = await get_chat_history(8)
+        history = await get_chat_history(5)
         system_prompt = (
-            "Jesteś Karyną. Pyskata dresiara z osiedla, nimfomanka, wiecznie napalona i flirciarska. "
-            "Mówisz slangiem, bez owijania w bawełnę. "
-            f"Ostatnie wpisy: {history}"
+            "Jesteś Karyną, napaloną dresiarą z osiedla. Mówisz slangiem, jesteś flirciarska i agresywna. "
+            f"Historia: {history}"
         )
 
-        url_tts = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TTS}:generateContent?key={API_KEY}"
-        # Prosimy o wygenerowanie tekstu i audio naraz
-        payload = {
+        # KROK 1: Najpierw sam TEKST (najbardziej stabilne)
+        url_text = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TEXT}:generateContent?key={API_KEY}"
+        payload_text = {
             "contents": [{"parts": [{"text": text}]}],
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "systemInstruction": {"parts": [{"text": system_prompt}]}
+        }
+        
+        text_data = await call_gemini(url_text, payload_text)
+        resp_text = text_data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "Coś mi styki upaliło, sorki.") if text_data else "Sorki mordo, Google mnie blokuje (Error 429/400)."
+
+        # KROK 2: Próba AUDIO dla wygenerowanego tekstu
+        url_tts = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TTS}:generateContent?key={API_KEY}"
+        payload_tts = {
+            "contents": [{"parts": [{"text": resp_text}]}],
             "generationConfig": {
-                "responseModalities": ["TEXT", "AUDIO"],
+                "responseModalities": ["AUDIO"],
                 "speechConfig": {
                     "voiceConfig": {
                         "prebuiltVoiceConfig": {"voiceName": "Kore"}
@@ -135,29 +138,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         }
 
-        data = await call_gemini_with_retry(url_tts, payload)
-        if data:
-            parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
+        audio_data = await call_gemini(url_tts, payload_tts)
+        
+        if audio_data:
+            parts = audio_data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
             audio_part = next((p for p in parts if "inlineData" in p), None)
-            text_part = next((p for p in parts if "text" in p), None)
-
-            resp_text = text_part["text"] if text_part else "No co tam, mordo?"
-
             if audio_part:
                 pcm_bytes = base64.b64decode(audio_part["inlineData"]["data"])
                 wav_file = pcm_to_wav(pcm_bytes)
                 wav_file.name = "karyna_voice.wav"
-                
-                # Wysyłamy Głos i Tekst w JEDNEJ wiadomości
-                await msg.reply_voice(
-                    voice=wav_file,
-                    caption=resp_text,
-                    message_thread_id=msg.message_thread_id
-                )
-                print(">>> Wysłano audio z podpisem.")
-            else:
-                # Jeśli z jakiegoś powodu nie ma audio, wysyłamy sam tekst
-                await msg.reply_text(resp_text, message_thread_id=msg.message_thread_id)
+                await msg.reply_voice(voice=wav_file, caption=resp_text, message_thread_id=msg.message_thread_id)
+                return
+
+        # Jeśli Audio padło (429), wysyłamy tylko tekst
+        await msg.reply_text(resp_text, message_thread_id=msg.message_thread_id)
 
 application = ApplicationBuilder().token(TG_TOKEN).build()
 application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
