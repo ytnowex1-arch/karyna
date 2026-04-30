@@ -78,6 +78,27 @@ async def get_chat_history(limit=20):
         return "\n".join([f"{m.get('user', 'Anon')}: {m.get('text', '')}" for m in recent])
     except: return ""
 
+async def call_gemini_with_retry(url, payload, max_retries=5):
+    """Implementacja wykładniczego wycofywania dla zapytań API."""
+    async with httpx.AsyncClient() as client:
+        for i in range(max_retries):
+            try:
+                res = await client.post(url, json=payload, timeout=60.0)
+                if res.status_code == 200:
+                    return res.json()
+                elif res.status_code == 500:
+                    # Błąd serwera - czekamy i ponawiamy
+                    wait_time = (2 ** i)
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    print(f"Błąd API ({res.status_code}): {res.text}")
+                    return None
+            except Exception as e:
+                print(f"Wyjątek podczas zapytania: {e}")
+                await asyncio.sleep(2 ** i)
+    return None
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg: return
@@ -104,9 +125,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Ostatnie wpisy: {history}"
         )
 
-        # Generujemy odpowiedź z Audio
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TTS}:generateContent?key={API_KEY}"
-        payload = {
+        # Próba wygenerowania odpowiedzi z Audio
+        url_tts = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TTS}:generateContent?key={API_KEY}"
+        payload_tts = {
             "contents": [{"parts": [{"text": f"Mów do mnie jak Karyna: {text}"}]}],
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "generationConfig": {
@@ -119,29 +140,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         }
 
-        async with httpx.AsyncClient() as client:
-            try:
-                res = await client.post(url, json=payload, timeout=60.0)
-                if res.status_code == 200:
-                    data = res.json()
-                    # Wyciągamy tekst (jeśli jest) i audio
-                    parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
-                    
-                    # Szukamy Audio w formacie L16 (PCM)
-                    audio_part = next((p for p in parts if "inlineData" in p and p["inlineData"]["mimeType"].startswith("audio/L16")), None)
-                    text_part = next((p for p in parts if "text" in p), None)
+        data = await call_gemini_with_retry(url_tts, payload_tts)
+        
+        if data:
+            parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
+            audio_part = next((p for p in parts if "inlineData" in p and p["inlineData"]["mimeType"].startswith("audio/L16")), None)
+            text_part = next((p for p in parts if "text" in p), None)
 
-                    if audio_part:
-                        pcm_bytes = base64.b64decode(audio_part["inlineData"]["data"])
-                        # Konwersja na WAV (Telegram nie łyka surowego PCM)
-                        wav_file = pcm_to_wav(pcm_bytes, sample_rate=24000)
-                        await msg.reply_voice(voice=wav_file, caption=text_part["text"] if text_part else None, message_thread_id=msg.message_thread_id)
-                    elif text_part:
-                        await msg.reply_text(text_part["text"], message_thread_id=msg.message_thread_id)
-                else:
-                    print(f"Błąd API: {res.text}")
-            except Exception as e:
-                print(f"Błąd: {e}")
+            if audio_part:
+                pcm_bytes = base64.b64decode(audio_part["inlineData"]["data"])
+                wav_file = pcm_to_wav(pcm_bytes, sample_rate=24000)
+                await msg.reply_voice(voice=wav_file, caption=text_part["text"] if text_part else None, message_thread_id=msg.message_thread_id)
+                return
+            elif text_part:
+                await msg.reply_text(text_part["text"], message_thread_id=msg.message_thread_id)
+                return
+
+        # Fallback: Jeśli TTS padnie całkowicie po 5 próbach, spróbujmy chociaż sam tekst modelem Flash
+        url_text = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TEXT}:generateContent?key={API_KEY}"
+        payload_text = {
+            "contents": [{"parts": [{"text": f"Mów do mnie jak Karyna: {text}"}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]}
+        }
+        
+        text_data = await call_gemini_with_retry(url_text, payload_text, max_retries=2)
+        if text_data:
+            response_text = text_data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "Sorki mordo, coś mi się styki przegrzały.")
+            await msg.reply_text(response_text, message_thread_id=msg.message_thread_id)
 
 application = ApplicationBuilder().token(TG_TOKEN).build()
 application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
