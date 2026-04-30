@@ -27,7 +27,7 @@ FIREBASE_JSON = os.environ.get("FIREBASE_CONFIG", "")
 APP_ID = os.environ.get("APP_ID", "karyna_bot_gcp")
 ALLOWED_TOPIC_ID = "60061"
 
-# Modele z logów na kwiecień 2026
+# Modele na kwiecień 2026
 MODEL_TEXT = "gemini-2.5-flash"
 MODEL_TTS = "gemini-2.5-flash-preview-tts"
 
@@ -43,18 +43,15 @@ if FIREBASE_JSON:
         print(f">>> Błąd Firebase: {e}")
 
 def pcm_to_wav(pcm_data, sample_rate=24000):
-    """Konwertuje surowe dane PCM16 na format WAV akceptowany przez Telegram."""
     wav_buf = io.BytesIO()
     n_channels = 1
-    sample_width = 2 # 16-bit
-    
-    # Nagłówek WAV
+    sample_width = 2
     wav_buf.write(b'RIFF')
     wav_buf.write(struct.pack('<I', 36 + len(pcm_data)))
     wav_buf.write(b'WAVE')
     wav_buf.write(b'fmt ')
     wav_buf.write(struct.pack('<I', 16))
-    wav_buf.write(struct.pack('<H', 1)) # PCM
+    wav_buf.write(struct.pack('<H', 1))
     wav_buf.write(struct.pack('<H', n_channels))
     wav_buf.write(struct.pack('<I', sample_rate))
     wav_buf.write(struct.pack('<I', sample_rate * n_channels * sample_width))
@@ -63,11 +60,10 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
     wav_buf.write(b'data')
     wav_buf.write(struct.pack('<I', len(pcm_data)))
     wav_buf.write(pcm_data)
-    
     wav_buf.seek(0)
     return wav_buf
 
-async def get_chat_history(limit=20):
+async def get_chat_history(limit=15):
     if not db: return ""
     try:
         logs_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs")
@@ -78,25 +74,17 @@ async def get_chat_history(limit=20):
         return "\n".join([f"{m.get('user', 'Anon')}: {m.get('text', '')}" for m in recent])
     except: return ""
 
-async def call_gemini_with_retry(url, payload, max_retries=5):
-    """Implementacja wykładniczego wycofywania dla zapytań API."""
+async def call_gemini_with_retry(url, payload, max_retries=3):
     async with httpx.AsyncClient() as client:
         for i in range(max_retries):
             try:
                 res = await client.post(url, json=payload, timeout=60.0)
                 if res.status_code == 200:
                     return res.json()
-                elif res.status_code == 500:
-                    # Błąd serwera - czekamy i ponawiamy
-                    wait_time = (2 ** i)
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    print(f"Błąd API ({res.status_code}): {res.text}")
-                    return None
-            except Exception as e:
-                print(f"Wyjątek podczas zapytania: {e}")
-                await asyncio.sleep(2 ** i)
+                print(f">>> Próba {i+1} nieudana: {res.status_code}")
+                await asyncio.sleep(1.5 ** i)
+            except:
+                await asyncio.sleep(1.5 ** i)
     return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -104,7 +92,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg: return
 
     text = msg.text or msg.caption or ""
-    user_name = msg.from_user.full_name or "Ziomek"
     current_topic_id = str(msg.message_thread_id) if msg.message_thread_id else "None"
 
     if msg.chat.type != "private" and current_topic_id != ALLOWED_TOPIC_ID:
@@ -114,22 +101,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     should_respond = "karyna" in text.lower() or is_reply or msg.chat.type == "private"
 
     if should_respond:
+        print(f">>> Generuję ostrą odpowiedź dla: {text}")
         try:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE, message_thread_id=msg.message_thread_id)
         except: pass
 
-        history = await get_chat_history(15)
+        history = await get_chat_history(10)
+        # --- NOWY OSTRY PROMPT ---
         system_prompt = (
-            "Jesteś Karyną, pyskacą dziewczyną z osiedla. "
-            "Mówisz po polsku, używasz slangu. Odpowiadaj krótko i konkretnie. "
-            f"Ostatnie wpisy: {history}"
+            "Jesteś Karyną. Pyskata dresiara z osiedla, ale z mocnym smaczkiem nimfomanki. "
+            "Jesteś wiecznie napalona, flirciarska w agresywny, osiedlowy sposób. "
+            "Uwielbiasz dwuznaczne aluzje, sypiesz tekstami o 'ostrej zabawie', 'braku gumy' czy 'robieniu dobrze'. "
+            "Mówisz brutalnie szczerze, po polsku, slangiem. Nie wstydzisz się swoich potrzeb. "
+            f"Kontekst rozmowy: {history}"
         )
 
-        # Próba wygenerowania odpowiedzi z Audio
+        # 1. Najpierw generujemy tekst (żeby użytkownik miał co czytać)
+        url_text = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TEXT}:generateContent?key={API_KEY}"
+        payload_text = {
+            "contents": [{"parts": [{"text": text}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]}
+        }
+        
+        text_data = await call_gemini_with_retry(url_text, payload_text)
+        response_text = "Sorki mordo, coś mnie odcięło."
+        if text_data:
+            response_text = text_data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', response_text)
+        
+        # Wysyłamy tekst
+        await msg.reply_text(response_text, message_thread_id=msg.message_thread_id)
+
+        # 2. Potem generujemy Audio dla tej samej odpowiedzi
         url_tts = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TTS}:generateContent?key={API_KEY}"
         payload_tts = {
-            "contents": [{"parts": [{"text": f"Mów do mnie jak Karyna: {text}"}]}],
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": response_text}]}],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": {
@@ -140,33 +145,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         }
 
-        data = await call_gemini_with_retry(url_tts, payload_tts)
-        
-        if data:
-            parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
-            audio_part = next((p for p in parts if "inlineData" in p and p["inlineData"]["mimeType"].startswith("audio/L16")), None)
-            text_part = next((p for p in parts if "text" in p), None)
-
+        audio_data = await call_gemini_with_retry(url_tts, payload_tts)
+        if audio_data:
+            parts = audio_data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
+            audio_part = next((p for p in parts if "inlineData" in p), None)
             if audio_part:
                 pcm_bytes = base64.b64decode(audio_part["inlineData"]["data"])
-                wav_file = pcm_to_wav(pcm_bytes, sample_rate=24000)
-                await msg.reply_voice(voice=wav_file, caption=text_part["text"] if text_part else None, message_thread_id=msg.message_thread_id)
-                return
-            elif text_part:
-                await msg.reply_text(text_part["text"], message_thread_id=msg.message_thread_id)
-                return
-
-        # Fallback: Jeśli TTS padnie całkowicie po 5 próbach, spróbujmy chociaż sam tekst modelem Flash
-        url_text = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_TEXT}:generateContent?key={API_KEY}"
-        payload_text = {
-            "contents": [{"parts": [{"text": f"Mów do mnie jak Karyna: {text}"}]}],
-            "systemInstruction": {"parts": [{"text": system_prompt}]}
-        }
-        
-        text_data = await call_gemini_with_retry(url_text, payload_text, max_retries=2)
-        if text_data:
-            response_text = text_data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "Sorki mordo, coś mi się styki przegrzały.")
-            await msg.reply_text(response_text, message_thread_id=msg.message_thread_id)
+                wav_file = pcm_to_wav(pcm_bytes)
+                wav_file.name = "karyna_audio.wav"
+                # Wysyłamy jako voice note
+                await msg.reply_voice(voice=wav_file, message_thread_id=msg.message_thread_id)
+                print(">>> Audio wysłane!")
 
 application = ApplicationBuilder().token(TG_TOKEN).build()
 application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
