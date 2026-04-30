@@ -80,27 +80,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text or msg.caption or ""
     user_name = msg.from_user.full_name or "Ziomek"
-    topic_id = msg.message_thread_id
+    topic_id = msg.message_thread_id # ID podgrupy/wątku
 
     # Funkcja diagnostyczna
     if "karyna jakie to id" in text.lower():
-        await msg.reply_text(f"Mordo, ID tej podgrupy to: `{topic_id}`", parse_mode='Markdown')
+        await msg.reply_text(f"Mordo, ID tej podgrupy to: `{topic_id}`", parse_mode='Markdown', message_thread_id=topic_id)
         return
 
     if text:
         await save_message_to_db(user_name, text, topic_id)
 
+    # Sprawdzenie czy bot powinien odpowiedzieć
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id
     should_respond = "karyna" in text.lower() or is_reply_to_bot or msg.chat.type == "private"
 
     if should_respond:
-        log(f"Karyna generuje odpowiedź dla {user_name}")
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        log(f"Karyna generuje odpowiedź dla {user_name} w wątku {topic_id}")
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING, message_thread_id=topic_id)
+        except: pass
 
         history_context = await get_chat_history(25)
         system_prompt = (
             "Jesteś Karyną. Dziewczyna z polskiego osiedla, pyskata, ale lojalna ziomalka. "
             "Mówisz szorstko, potocznie, po polsku. Używasz slangu (mordo, ziom, lipa, ogarnij się). "
+            "Jeśli jesteś w grupie tematycznej, zachowuj się swobodnie. "
             "Oto co pisali wcześniej:\n"
             f"{history_context}\n\n"
             "Odpowiedz krótko i konkretnie na ostatnią wiadomość."
@@ -132,7 +136,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data = res.json()
                     ans = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "")
                     if ans:
-                        await msg.reply_text(ans)
+                        # Ważne: wysyłamy odpowiedź z zachowaniem thread_id
+                        await msg.reply_text(ans, message_thread_id=topic_id)
+                else:
+                    log(f"Błąd Gemini API: {res.status_code}")
             except Exception as e:
                 log(f"Błąd komunikacji: {e}")
 
@@ -145,14 +152,15 @@ app = Flask(__name__)
 @app.route("/", methods=['GET', 'POST'])
 async def webhook():
     if request.method == 'POST':
-        # Przekazujemy update z Telegrama do aplikacji bota
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        await application.process_update(update)
+        try:
+            update = Update.de_json(request.get_json(force=True), application.bot)
+            await application.process_update(update)
+        except Exception as e:
+            log(f"Błąd procesowania update: {e}")
         return "OK", 200
     return "Karyna is alive", 200
 
 def main():
-    # Inicjalizacja bota (wymagane przed użyciem webhooka)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(application.initialize())
