@@ -24,7 +24,7 @@ TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 FIREBASE_JSON = os.environ.get("FIREBASE_CONFIG", "")
 APP_ID = os.environ.get("APP_ID", "karyna_bot_gcp")
 
-# ID DOZWOLONEJ PODGRUPY (Zmieniamy na string dla pewności przy porównywaniu)
+# ID DOZWOLONEJ PODGRUPY
 ALLOWED_TOPIC_ID = "60061"
 
 # --- INICJALIZACJA FIREBASE ---
@@ -39,8 +39,8 @@ if FIREBASE_JSON:
     except Exception as e:
         print(f">>> Błąd połączenia z Firebase: {e}")
 
-# AKTUALNY STABILNY MODEL ZGODNIE Z CHANGELOGIEM
-MODEL_NAME = "gemini-1.5-flash"
+# UŻYWAMY PEŁNEJ NAZWY WERSJI DLA REGIONU EUROPE-WEST1
+MODEL_NAME = "gemini-1.5-flash-001"
 
 def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -49,7 +49,6 @@ def log(msg):
 async def save_message_to_db(user_name, text, topic_id):
     if not db: return
     try:
-        # Zapisujemy do struktury wymaganej przez reguły (public/data)
         doc_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs").document()
         doc_ref.set({
             "user": user_name,
@@ -64,14 +63,12 @@ async def get_chat_history(limit=20):
     if not db: return ""
     try:
         logs_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs")
-        # Pobieramy logi (proste zapytanie bez złożonych filtrów zgodnie z Rule 2)
         docs = logs_ref.limit(50).get()
         
         history = []
         for d in docs:
             history.append(d.to_dict())
             
-        # Sortowanie w pamięci RAM
         history.sort(key=lambda x: x.get('timestamp') or 0)
         recent = history[-limit:]
         return "\n".join([f"{m.get('user', 'Anonim')}: {m.get('text', '')}" for m in recent])
@@ -88,11 +85,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = msg.from_user.full_name or "Ziomek"
     current_topic_id = str(msg.message_thread_id) if msg.message_thread_id else "None"
 
-    # BLOKADA: Karyna reaguje tylko w wyznaczonym temacie (lub w czacie prywatnym)
+    # BLOKADA TEMATU
     if msg.chat.type != "private" and current_topic_id != ALLOWED_TOPIC_ID:
         return
 
-    # Komenda diagnostyczna
     if "karyna jakie to id" in text.lower():
         await msg.reply_text(f"Mordo, ID tej podgrupy to: `{current_topic_id}`", parse_mode='Markdown')
         return
@@ -100,12 +96,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text:
         await save_message_to_db(user_name, text, current_topic_id)
 
-    # Reaguj jeśli: wspomniano "karyna", jest to odpowiedź na jej wiadomość lub czat prywatny
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id
     should_respond = "karyna" in text.lower() or is_reply_to_bot or msg.chat.type == "private"
 
     if should_respond:
-        log(f"Generuję odpowiedź dla {user_name} w wątku {current_topic_id}")
+        log(f"Generuję odpowiedź dla {user_name} w wątku {current_topic_id} używając {MODEL_NAME}")
         try:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING, message_thread_id=msg.message_thread_id)
         except: pass
@@ -127,7 +122,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 image_part = {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(image_bytes).decode('utf-8')}}
             except: pass
 
-        # Endpoint API Gemini
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
         
         contents_parts = [{"text": text}]
@@ -141,7 +135,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async with httpx.AsyncClient() as client:
             try:
-                # Implementacja retry z wykładniczym backoffem (wymóg techniczny)
                 for attempt in range(5):
                     res = await client.post(url, json=payload, timeout=30.0)
                     if res.status_code == 200:
@@ -150,7 +143,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if ans:
                             await msg.reply_text(ans, message_thread_id=msg.message_thread_id)
                         break
-                    elif res.status_code == 429: # Rate limit
+                    elif res.status_code == 429: 
                         await asyncio.sleep(2 ** attempt)
                     else:
                         log(f"Błąd Gemini API: {res.status_code} - {res.text}")
@@ -158,7 +151,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 log(f"Błąd komunikacji z AI: {e}")
 
-# --- KONFIGURACJA WEBHOOKA (Flask) ---
+# --- KONFIGURACJA WEBHOOKA ---
 application = ApplicationBuilder().token(TG_TOKEN).build()
 application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
 
@@ -174,7 +167,6 @@ async def init_tg_bot():
 @app.route("/", methods=['GET', 'POST'])
 def webhook():
     if request.method == 'POST':
-        # Cloud Run obsługuje webhooki asynchronicznie
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -188,6 +180,5 @@ def webhook():
     return "Karyna AI Status: Online", 200
 
 if __name__ == "__main__":
-    # Google Cloud Run przypisuje port automatycznie
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
