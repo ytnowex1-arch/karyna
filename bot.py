@@ -59,7 +59,6 @@ async def get_chat_history(limit=20):
     if not db: return ""
     try:
         logs_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs")
-        # Pobranie dokumentów bez skomplikowanych filtrów (Rule 2)
         docs = logs_ref.limit(50).get()
         
         history = []
@@ -82,6 +81,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = msg.from_user.full_name or "Ziomek"
     topic_id = msg.message_thread_id 
 
+    # Diagnostyka ID tematu
     if "karyna jakie to id" in text.lower():
         await msg.reply_text(f"Mordo, ID tej podgrupy to: `{topic_id}`", parse_mode='Markdown', message_thread_id=topic_id)
         return
@@ -93,7 +93,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     should_respond = "karyna" in text.lower() or is_reply_to_bot or msg.chat.type == "private"
 
     if should_respond:
-        log(f"Karyna generuje odpowiedź dla {user_name} w wątku {topic_id}")
+        log(f"Karyna generuje odpowiedź dla {user_name} (Wątek: {topic_id})")
         try:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING, message_thread_id=topic_id)
         except: pass
@@ -102,9 +102,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = (
             "Jesteś Karyną. Dziewczyna z polskiego osiedla, pyskata, ale lojalna ziomalka. "
             "Mówisz szorstko, potocznie, po polsku. Używasz slangu (mordo, ziom, lipa, ogarnij się). "
-            "Oto co pisali wcześniej:\n"
+            "Oto historia rozmowy:\n"
             f"{history_context}\n\n"
-            "Odpowiedz krótko i konkretnie na ostatnią wiadomość."
+            "Odpowiedz krótko i w swoim stylu."
         )
 
         image_part = None
@@ -135,44 +135,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if ans:
                         await msg.reply_text(ans, message_thread_id=topic_id)
                 else:
-                    log(f"Błąd Gemini API: {res.status_code}")
+                    log(f"Błąd Gemini: {res.status_code}")
             except Exception as e:
                 log(f"Błąd komunikacji: {e}")
 
-# --- KONFIGURACJA WEBHOOKA DLA CLOUD RUN ---
+# --- KONFIGURACJA SERWERA ---
 application = ApplicationBuilder().token(TG_TOKEN).build()
 application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
 
 app = Flask(__name__)
+initialized = False
+
+async def boot_bot():
+    global initialized
+    if not initialized:
+        await application.initialize()
+        initialized = True
 
 @app.route("/", methods=['GET', 'POST'])
 def webhook():
     if request.method == 'POST':
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            # Używamy pętli zdarzeń do asynchronicznego przetworzenia update'u
             data = request.get_json(force=True)
+            loop.run_until_complete(boot_bot())
             update = Update.de_json(data, application.bot)
-            
-            # Uruchomienie przetwarzania w pętli asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             loop.run_until_complete(application.process_update(update))
+        finally:
             loop.close()
-        except Exception as e:
-            log(f"Błąd procesowania update: {e}")
         return "OK", 200
-    return "Karyna is alive", 200
-
-def main():
-    # Inicjalizacja bota
-    init_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(init_loop)
-    init_loop.run_until_complete(application.initialize())
-    init_loop.close()
-    
-    port = int(os.environ.get("PORT", 8080))
-    log(f"Karyna startuje na porcie {port}")
-    app.run(host="0.0.0.0", port=port)
+    return "Karyna AI is ready and watching you.", 200
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
