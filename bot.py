@@ -5,7 +5,7 @@ import httpx
 import time
 import json
 from threading import Thread
-from flask import Flask
+from flask import Flask, request
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -24,9 +24,6 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 FIREBASE_JSON = os.environ.get("FIREBASE_CONFIG", "")
 APP_ID = os.environ.get("APP_ID", "karyna_bot_gcp")
-
-# Ustaw na None, aby bot działał we wszystkich podgrupach (topicach)
-ONLY_TOPIC_ID = None 
 
 # --- INICJALIZACJA FIREBASE ---
 db = None
@@ -49,7 +46,6 @@ def log(msg):
 async def save_message_to_db(user_name, text, topic_id):
     if not db: return
     try:
-        # Ścieżka zgodna z RULE 1
         doc_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs").document()
         doc_ref.set({
             "user": user_name,
@@ -64,14 +60,12 @@ async def get_chat_history(limit=20):
     if not db: return ""
     try:
         logs_ref = db.collection("artifacts").document(APP_ID).collection("public").document("data").collection("chat_logs")
-        # Proste zapytanie (RULE 2)
         docs = logs_ref.limit(50).get()
         
         history = []
         for d in docs:
             history.append(d.to_dict())
             
-        # Sortowanie w pamięci RAM
         history.sort(key=lambda x: x.get('timestamp') or 0)
         recent = history[-limit:]
         return "\n".join([f"{m.get('user', 'Anonim')}: {m.get('text', '')}" for m in recent])
@@ -86,37 +80,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text or msg.caption or ""
     user_name = msg.from_user.full_name or "Ziomek"
-    topic_id = msg.message_thread_id # To jest ID podgrupy
+    topic_id = msg.message_thread_id
 
-    # 1. Funkcja diagnostyczna - sprawdzenie ID
+    # Funkcja diagnostyczna
     if "karyna jakie to id" in text.lower():
-        await msg.reply_text(f"Mordo, ID tej podgrupy (tematu) to: `{topic_id}`", parse_mode='Markdown')
+        await msg.reply_text(f"Mordo, ID tej podgrupy to: `{topic_id}`", parse_mode='Markdown')
         return
 
-    # 2. Logowanie wiadomości do bazy (zawsze, jeśli jest tekst)
     if text:
         await save_message_to_db(user_name, text, topic_id)
 
-    # 3. Sprawdzenie, czy bot ma reagować (czy słowo 'karyna' jest w tekście lub czy to reply do bota)
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id
-    
     should_respond = "karyna" in text.lower() or is_reply_to_bot or msg.chat.type == "private"
 
     if should_respond:
-        # Filtr podgrupy (jeśli ustawiony)
-        if ONLY_TOPIC_ID is not None and topic_id != ONLY_TOPIC_ID:
-            log(f"Ignoruję wiadomość z podgrupy {topic_id}")
-            return
-
-        log(f"Karyna generuje odpowiedź dla {user_name} w podgrupie {topic_id}")
+        log(f"Karyna generuje odpowiedź dla {user_name}")
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
         history_context = await get_chat_history(25)
-
         system_prompt = (
             "Jesteś Karyną. Dziewczyna z polskiego osiedla, pyskata, ale lojalna ziomalka. "
             "Mówisz szorstko, potocznie, po polsku. Używasz slangu (mordo, ziom, lipa, ogarnij się). "
-            "Jesteś na grupie z ziomkami. Oto co pisali wcześniej:\n"
+            "Oto co pisali wcześniej:\n"
             f"{history_context}\n\n"
             "Odpowiedz krótko i konkretnie na ostatnią wiadomość."
         )
@@ -148,26 +133,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ans = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "")
                     if ans:
                         await msg.reply_text(ans)
-                else:
-                    log(f"Błąd Gemini API: {res.status_code}")
             except Exception as e:
                 log(f"Błąd komunikacji: {e}")
 
-# --- SERWER FLASK ---
+# --- KONFIGURACJA WEBHOOKA DLA CLOUD RUN ---
+application = ApplicationBuilder().token(TG_TOKEN).build()
+application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
+
 app = Flask(__name__)
-@app.route("/")
-def health_check():
-    return "OK", 200
+
+@app.route("/", methods=['GET', 'POST'])
+async def webhook():
+    if request.method == 'POST':
+        # Przekazujemy update z Telegrama do aplikacji bota
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        await application.process_update(update)
+        return "OK", 200
+    return "Karyna is alive", 200
 
 def main():
-    port = int(os.environ.get("PORT", 8080))
-    Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
-
-    application = ApplicationBuilder().token(TG_TOKEN).build()
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
+    # Inicjalizacja bota (wymagane przed użyciem webhooka)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.initialize())
     
-    log("Karyna gotowa do akcji na podgrupach!")
-    application.run_polling()
+    port = int(os.environ.get("PORT", 8080))
+    log(f"Karyna startuje na porcie {port}")
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
